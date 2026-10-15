@@ -1,153 +1,120 @@
-# India_us_trade_deal_sentiment_analysis
-Social-media sentiment analysis of the US–India trade deal: TF-IDF + VADER vs an LLM (Claude) on Reddit and X posts, with topic modelling, a side-by-side comparison and charts.
-# TF-IDF vs LLM: social-media sentiment on the US–India trade deal
-
-Compares a **classical NLP pipeline** (TF-IDF, NMF topics, VADER, logistic regression) with **LLM labelling** (Claude) on the same Reddit and X posts. It reports where the two agree, where they diverge, and what the community is talking about.
-
-The default topic is the 2026 US–India trade deal. Edit one config file to analyse something else, such as cricket.
-
-> **Data notice.** The datasets bundled in `data/raw/` are **synthetic**: written to mirror the real 2026 storyline, not scraped from Reddit or X. Use `collect_real.py` (below) to gather real posts. Every result in this README comes from the 110-post demo corpus.
-
+# US–India Trade Deal: What Is the Community Saying?
+ 
+Sentiment and topic analysis of real X (Twitter) posts about the 2026 US–India trade talks. The same posts are analysed twice, once with classic NLP (TF-IDF, VADER, logistic regression, NMF) and once with a large language model (Llama via the Groq API), and the two readings are compared.
+ 
+**Questions**
+1. What is the overall sentiment towards the deal: positive, negative or neutral?
+2. Which themes dominate the conversation?
+3. Does an LLM read the conversation differently from a word-counting model, and where?
 ---
-
-## What it does
-
-| Step | Classical lane | LLM lane |
+ 
+## Pipeline
+ 
+```
+ Raw posts ─► Cleaning ─┬─► Part A: Classic NLP ──────────────┐
+ (X, 2,804)  (1,666)    │   TF-IDF + 12 hand-crafted features │
+                        │   VADER sentiment                   ├─► Part C: Compare ─► Insights
+                        │   Logistic regression, NMF topics   │
+                        └─► Part B: LLM (Llama via Groq) ─────┘
+                            sentiment + topic + reason per post
+```
+ 
+| Stage | What happens | Tools |
 |---|---|---|
-| Features | TF-IDF (1–2 word phrases, domain stop-words) | — |
-| Sentiment | VADER lexicon score → pos / neu / neg | Claude: sentiment **and** stance, sarcasm aware |
-| Topics | NMF clusters over TF-IDF | Claude: one label from an 11-topic list |
-| Learning | Logistic regression on TF-IDF, trained on the LLM labels (5-fold CV) | — |
-| Compare | Agreement, Cohen's κ, macro-F1, confusion matrix, topic match (ARI), biggest disagreements | |
-
-## Architecture
-
-```
- COLLECT            collect_real.py / src/collectors/   Reddit (PRAW) · Bluesky · Hacker News · X API v2
-    │               or data/raw/*.jsonl (demo, synthetic, your own export)
-    ▼               schema: id, source, channel, created_at, score, text
- PREPROCESS         src/preprocess.py
-    │               de-dup · two text views:
-    │                 text_vader  – keeps case, punctuation, emoji
-    │                 text_tfidf  – lowercase, tokens like 18pct, usd500bn, h1bvisa
-    ├──────────────────────────────┐
-    ▼                              ▼
- CLASSICAL  src/classical.py     LLM  src/llm_analyzer.py
-  TfidfVectorizer                 Claude Messages API + forced tool schema
-  NMF (6 topics)                  batches of 20 → {sentiment, stance, topic, sarcasm}
-  VADER compound                  cached to JSONL · optional narrative briefing
-  LogReg on LLM labels (CV)
-    └──────────────┬───────────────┘
-                   ▼
- COMPARE    src/compare.py    agreement · Cohen's κ · macro-F1 · confusion · ARI · disagreements
-                   ▼
- REPORT     src/report.py     results/metrics.json · CSVs · results/figures/*.png
-```
-
-## Quick start
-
-```bash
-pip install -r requirements.txt
-
-# Offline demo: no API keys needed (uses cached LLM labels)
-python run_pipeline.py --source demo --llm cache
-
-pytest -q tests
-```
-
-## Using real data
-
-`collect_real.py` gathers on-topic posts into `data/raw/real_posts.csv/.jsonl`, with a link to each original. Run it on your own machine:
-
-```bash
-# Reddit (free): create a "script" app at https://www.reddit.com/prefs/apps
-export REDDIT_CLIENT_ID=...  REDDIT_CLIENT_SECRET=...
-export REDDIT_USER_AGENT="trade-sentiment/0.1 by u/<you>"
-# Bluesky (free): Settings > Privacy and security > App passwords
-export BSKY_HANDLE=you.bsky.social  BSKY_APP_PASSWORD=...
-# X (optional, paid API tier with search)
-export X_BEARER_TOKEN=...
-
-python collect_real.py --target 2500
-```
-
-Hacker News needs no key. Sources without credentials are skipped. Posts are kept only if they mention India **and** trade or tariffs.
-
-Then analyse them with the Claude API:
-
-```bash
-export ANTHROPIC_API_KEY=...
-python run_pipeline.py --source file --input data/raw/real_posts.jsonl --llm api --insights
-```
-
-## CLI
-
-| Flag | Values | Meaning |
+| 1. Collect | X search for posts that mention India **and** the US **and** trade or tariffs | Python, `twscrape` |
+| 2. Store | 2,804 raw posts in one CSV | pandas |
+| 3. Clean | 2,804 → 1,666 posts (see below) | pandas |
+| 4A. Classic NLP | TF-IDF features, VADER sentiment, logistic regression, NMF topics | scikit-learn, vaderSentiment |
+| 4B. LLM | Posts sent in batches of 30; the model returns sentiment, topic and a one-line reason as JSON | Groq API, `llama-3.1-8b-instant` |
+| 5. Compare | Agreement, Cohen's kappa, confusion matrix, topic overlap, sentiment over time | scikit-learn, matplotlib |
+ 
+## Data
+ 
+- **Source:** public X posts found by keyword search, 20 September – 8 October 2026.
+- **Raw:** 2,804 posts.
+- **Cleaning** (one row = one real voice):
+  1. Keep posts from 20 September 2026 onwards
+  2. Drop exact duplicate texts
+  3. Drop posts longer than 1,000 characters (newsletters where the topic is a passing mention)
+  4. Keep at most 3 posts per author (their most-liked)
+  5. Drop near-duplicates (same text with different @mentions or links)
+- **After cleaning:** 1,666 posts.
+- **Privacy:** author handles are replaced with a hash (`author_hash`).
+## Method
+ 
+### Part A: Classic NLP
+- **TF-IDF features:** unigrams and bigrams (`ngram_range=(1, 2)`), `min_df=5`, `max_df=0.6`. Stop words and the search words (india, us, trade, tariff…) are removed because every post contains them. Negations are kept for the sentiment model.
+- **12 hand-crafted features** describe *how* a post is written: length, `!` count, CAPS ratio, negations, likes (log-scaled) and similar.
+- **VADER** gives each post a lexicon-based sentiment score.
+- **Logistic regression** (80/20 train–test split, `class_weight="balanced"`) is trained on VADER's labels as weak supervision. Two versions are compared: TF-IDF only, and TF-IDF plus the hand-crafted features.
+- **NMF** finds 8 topics from the TF-IDF matrix.
+### Part B: LLM labelling
+- Model: `llama-3.1-8b-instant` on Groq (falls back to another available model if needed).
+- Each request sends 30 posts and gets back JSON with a **sentiment** (Positive / Negative / Neutral), a **topic** and a short **reason**.
+- The prompt tells the model to read sarcasm as the author means it and to label plain news as Neutral.
+- Topics: Deal negotiations · Russian oil & sanctions · Tariffs & economic impact · Geopolitics & diplomacy · Domestic politics · Not about India–US trade.
+- `temperature=0`; every label is checked in Python against the allowed values. Results are cached to `llm_labels.csv`, so a re-run continues where it stopped.
+### Part C: Comparison
+- Agreement % and **Cohen's kappa** between VADER, the TF-IDF model and the LLM.
+- The posts where the methods disagree most, with the LLM's reason.
+- NMF topics against LLM topics.
+- Daily net sentiment (% positive − % negative) for each method.
+- **Better teacher:** the same TF-IDF model is retrained on the LLM's labels instead of VADER's, to show that label quality matters more than model choice.
+## Results
+ 
+Run the notebook and fill in this table with your own numbers:
+ 
+| | VADER | TF-IDF model (VADER labels) | TF-IDF model (LLM labels) | LLM |
+|---|---|---|---|---|
+| Positive | | | | |
+| Neutral | | | | |
+| Negative | | | | |
+| Agreement with LLM | | | | — |
+| Cohen's kappa vs LLM | | | | — |
+ 
+### What the conversation is about
+1. **The talks have stalled.** The most-shared news is the Finance Minister saying talks have reached a "plateau", and USTR saying a deal is "not imminent". Most of these posts are factual news; the opinions around them are pessimistic.
+2. **Russian oil is the biggest pressure point.** A US sanctions law allows tariffs of up to 100% on buyers of Russian energy. The tone is tense and often defiant.
+3. **Sovereignty splits the conversation.** Some posts read the stalemate as India standing firm; others accuse the government of weakness.
+### Classic NLP vs LLM
+| | TF-IDF + VADER + logistic regression | LLM (Groq) |
 |---|---|---|
-| `--source` | `demo` · `file` · `live` | Bundled 110 posts, a JSONL you supply (`--input`), or the live collectors |
-| `--llm` | `cache` · `api` | Reuse saved labels (`--labels`) or call Claude |
-| `--insights` | | With `--llm api`, also write `results/llm_insights.md` |
-
-## Datasets
-
-| File | Rows | Notes |
-|---|---|---|
-| `data/raw/demo_corpus.jsonl` | 110 | Synthetic, hand-written posts; LLM labels in `data/processed/llm_labels_insession.jsonl` |
-| `data/raw/synthetic_2400.csv/.jsonl` | 2,400 | Synthetic, from ~65 templates (`scripts/generate_synthetic.py`). Has `gen_*` labels taken from each template. Good for training/practice; flatters TF-IDF |
-| `data/raw/real_posts.csv/.jsonl` | — | Created by `collect_real.py` |
-
-## Switching topic (e.g. cricket)
-
-In `src/config.py`, change `topic_name`, `reddit_query`, `reddit_subreddits`, `x_query` and `TOPIC_TAXONOMY`. In `collect_real.py`, change `QUERY_TERMS` and the `RELEVANT` filter. Nothing else needs to change.
-
-## Demo results (110 posts)
-
-| | VADER | TF-IDF + LogReg (CV) | LLM |
-|---|---|---|---|
-| Positive | 46% | 9% | 28% |
-| Neutral | 23% | 55% | 38% |
-| Negative | 31% | 35% | 34% |
-| Agreement with LLM | 51% (κ 0.28) | 49% (κ 0.21) | — |
-
-- **Sarcasm:** VADER matches the LLM on 25% of sarcastic posts, vs 53% on the rest.
-- **Topics:** NMF clusters vs LLM topics give ARI 0.15 and purity 0.44. NMF groups posts by shared words (e.g. every "99% settled" post); the LLM groups them by meaning.
-- **Classifier:** TF-IDF + LogReg needs far more than 110 labelled posts; here it falls back to "neutral". A common pattern is to label 1–2k posts with the LLM and train the cheap model on those.
-
-**Community themes (demo data):** relief among exporters (Tiruppur, Surat, Andhra shrimp); growing frustration with delays and the unpublished text; Russian oil seen as a loss of independence; farmers split on both sides.
-
-## Project structure
-
-```
-run_pipeline.py              orchestrator / CLI
-collect_real.py              real-data collector (Reddit, Bluesky, HN, X)
-scripts/generate_synthetic.py
-src/
-  config.py                  queries, model settings, topic list
-  preprocess.py              cleaning, two text views
-  classical.py               TF-IDF, NMF, VADER, LogReg
-  llm_analyzer.py            prompt, tool schema, batching, insights
-  compare.py                 metrics, confusion, disagreements
-  report.py                  charts
-  collectors/                reddit_collector.py, x_collector.py
-tests/test_pipeline.py
-results/                     metrics.json, labelled_posts.csv, top_disagreements.csv, figures/
-```
-
-## Glossary
-
-- **TF-IDF:** weights a word by how often it appears in a post, discounted by how many posts contain it, so distinctive words rank high.
-- **VADER:** rule-based sentiment from a ~7,500-entry human-scored word list, plus rules for caps, `!`, "very", "not" and "but". Output is a compound score from −1 to +1; ≥ 0.05 is positive and ≤ −0.05 is negative.
-- **NMF:** splits the TF-IDF matrix into topic clusters, each described by its top words.
-- **Cohen's κ:** agreement corrected for chance, κ = (p_o − p_e) / (1 − p_e). 0.21–0.40 is "fair".
-- **Stance vs sentiment:** sentiment is the tone of a post; stance is whether the author supports the deal. "Deadline missed again" is negative in tone but neutral in stance.
-
+| Sarcasm, irony | Takes words literally | Reads the intended meaning |
+| News vs opinion | "BIG RELIEF?" scores as positive | Plain news is labelled Neutral |
+| Off-topic posts | Cannot tell | Flags them |
+| Topics | Keyword groups, one large catch-all | Named, meaningful categories |
+| Explainability | Exact word weights | A short reason per post |
+| Speed and cost | Seconds, free | Minutes; free tier has daily limits |
+| Reproducibility | Same result every run | Can vary slightly between runs |
+ 
+**Takeaway:** TF-IDF is fast, free and transparent, which makes it good for finding keywords and storylines. The LLM is better at understanding what people mean, which matters on political social media where sarcasm and headlines are common.
+ 
+## How to run
+ 
+The notebook is written for Google Colab.
+ 
+1. Open `US_India_Trade_Sentiment_Analysis.ipynb` in Colab.
+2. Upload `x_all.csv` when asked (or place it next to the notebook).
+3. Get a free API key at [console.groq.com](https://console.groq.com) and add it as a Colab secret named `GROQ_API_KEY` (the notebook asks for it if it isn't set).
+4. Run all cells. For a quick test, set `LLM_LIMIT = 300` in section 5.3.
+Libraries: `pandas`, `numpy`, `scikit-learn`, `matplotlib`, `vaderSentiment`, `groq`.
+ 
+## Files
+ 
+| File | Description |
+|---|---|
+| `US_India_Trade_Sentiment_Analysis.ipynb` | Full analysis: cleaning, Part A, Part B, comparison, insights |
+| `x_all.csv` | Raw posts (input) |
+ 
+Created when the notebook runs: `posts_classic_nlp.csv`, `llm_labels.csv`, `posts_with_all_labels.csv`, `architecture.png`.
+ 
 ## Limitations
-
-- Bundled data is synthetic. The demo LLM labels were produced by Claude in a chat session using the same schema as the API code.
-- There are no human gold labels, so "agreement with the LLM" is not accuracy. Hand-label ~200 posts to measure both methods properly.
-- X recent search covers about 7 days and needs a paid tier. Reddit search is relevance-limited. Follow each platform's API terms.
-- The LLM costs money per post and can drift between model versions, so pin the model and cache its outputs.
-
-## Requirements
-
-Python 3.10+, `pandas`, `scikit-learn`, `vaderSentiment`, `matplotlib`, `anthropic`, `praw`, `requests`, `pytest` (see `requirements.txt`).
+- X only, about three weeks, English posts found by keyword search. Not a representative sample of all opinion.
+- The TF-IDF model first learns from VADER labels, so it inherits VADER's mistakes.
+- There are no human-labelled posts, so agreement with the LLM is not the same as accuracy.
+## Next steps
+- Hand-label about 200 posts to measure the true accuracy of each method.
+- Add Reddit as a second community.
+- Re-run weekly to track how sentiment changes as the talks move.
+## Author
+**Harekrishna Shah** · Data Analyst · [LinkedIn](https://www.linkedin.com/in/hshah13) · [GitHub](https://github.com/Harekrishnashah13)
